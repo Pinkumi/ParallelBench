@@ -37,6 +37,9 @@ def test_statistics():
     assert result['mad_ms'] == 1
     assert result['iqr_ms'] == 2
     assert result['std_ms'] == pytest.approx(np.sqrt(2))
+    assert result['mean_ms'] == 3
+    assert result['min_ms'] == 1
+    assert result['max_ms'] == 5
 
 
 def test_measure_synchronizes_every_iteration():
@@ -83,10 +86,13 @@ def test_real_cuda():
     report = run(BenchmarkConfig(sizes=(16,), warmup=1, repetitions=2, device='cuda'))
     assert torch.backends.cuda.matmul.allow_tf32 == original
     rows = report['results']
-    assert len(rows) == 4
-    assert {r['operation'] for r in rows} == {'compute', 'host_to_device', 'device_to_host'}
+    assert len(rows) == 5
+    assert {r['operation'] for r in rows} == {'compute', 'host_to_device', 'device_to_host', 'end_to_end'}
     assert all(r['valid'] for r in rows)
     assert next(r for r in rows if r['backend'] == 'cuda' and r['operation'] == 'compute')['speedup'] > 0
+    cpu = next(r for r in rows if r['backend'] == 'cpu')
+    e2e = next(r for r in rows if r['operation'] == 'end_to_end')
+    assert e2e['end_to_end_speedup'] == pytest.approx(cpu['median_ms'] / e2e['median_ms'])
 
 
 def test_seed_inputs_are_independent_of_size_order(monkeypatch):

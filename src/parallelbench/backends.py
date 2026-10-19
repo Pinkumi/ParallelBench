@@ -1,5 +1,6 @@
 """Allocation-free compute paths and explicit CUDA transfer measurements."""
-from time import perf_counter
+import gc
+from time import perf_counter_ns
 import numpy as np
 
 
@@ -41,23 +42,55 @@ class CUDABackend:
         self.host_output.copy_(self.output)
         return self.host_output.numpy()
 
+    def end_to_end(self):
+        self.upload()
+        self.compute()
+        return self.download()
 
-def measure(operation, repetitions, synchronize=lambda: None):
+
+def measure(operation, repetitions, synchronize=lambda: None, *, iterations_per_sample=1):
+    """Return raw wall-clock milliseconds per sample (one sample may be a batch)."""
     samples = []
-    for _ in range(repetitions):
-        synchronize()
-        start = perf_counter()
-        operation()
-        synchronize()
-        samples.append((perf_counter() - start) * 1000)
+    gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(repetitions):
+            synchronize()
+            start = perf_counter_ns()
+            for _ in range(iterations_per_sample):
+                operation()
+            synchronize()
+            samples.append((perf_counter_ns() - start) / 1_000_000)
+    finally:
+        if gc_enabled:
+            gc.enable()
     return samples
 
 
-def discover_cuda():
+def calibrate_cpu(operation, minimum_ms):
+    """Choose a fixed batch size outside timing samples; cap calibration work."""
+    iterations = 1
+    if minimum_ms == 0:
+        return iterations
+    while True:
+        elapsed = measure(operation, 1, iterations_per_sample=iterations)[0]
+        if elapsed >= minimum_ms or iterations >= 1_048_576:
+            return iterations
+        iterations = min(iterations * 2, 1_048_576)
+
+
+def load_torch():
     try:
         import torch
     except ImportError as exc:
         return None, f"PyTorch unavailable: {exc}"
+    return torch, None
+
+
+def discover_cuda():
+    torch, reason = load_torch()
+    if torch is None:
+        return None, reason
     if not torch.cuda.is_available():
         return None, "CUDA unavailable according to PyTorch"
     return torch, None

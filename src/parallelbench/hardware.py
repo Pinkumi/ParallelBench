@@ -3,12 +3,28 @@ import contextlib
 import io
 import os
 import platform
+from time import get_clock_info
 from importlib.metadata import PackageNotFoundError, version
 import numpy as np
-from threadpoolctl import threadpool_info
+from threadpoolctl import threadpool_info, threadpool_limits
 
 
-def collect_environment(torch=None):
+@contextlib.contextmanager
+def cpu_thread_context(pytorch, threads):
+    """Limit loaded BLAS/OpenMP pools and PyTorch intra-op threads, then restore."""
+    previous = pytorch.get_num_threads() if pytorch is not None else None
+    with threadpool_limits(limits=threads):
+        try:
+            if pytorch is not None and threads is not None:
+                pytorch.set_num_threads(threads)
+            yield
+        finally:
+            if pytorch is not None and threads is not None:
+                pytorch.set_num_threads(previous)
+
+
+def collect_environment(torch=None, pytorch=None):
+    pytorch = pytorch if pytorch is not None else torch
     versions = {}
     for package in ("parallelbench", "numpy", "pandas", "matplotlib", "torch", "threadpoolctl"):
         try:
@@ -26,9 +42,17 @@ def collect_environment(torch=None):
         "os": platform.platform(), "machine": platform.machine(),
         "cpu": cpu or "unknown", "logical_cpu_count": os.cpu_count(),
         "python": platform.python_version(), "libraries": versions,
+        "timer": vars(get_clock_info("perf_counter")),
+        "pytorch": None if pytorch is None else {
+            "intraop_threads": pytorch.get_num_threads(),
+            "interop_threads": pytorch.get_num_interop_threads(),
+            "parallel_info": pytorch.__config__.parallel_info(),
+            "cuda_runtime": pytorch.version.cuda,
+        },
         "numpy_config": config.getvalue(), "threadpools": threadpool_info(),
         "thread_environment": {key: os.environ.get(key) for key in
-            ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")},
+            ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "OMP_DYNAMIC", "MKL_DYNAMIC")},
         "gpu": None if torch is None else {
             "name": torch.cuda.get_device_name(),
             "memory_bytes": torch.cuda.get_device_properties(0).total_memory,
