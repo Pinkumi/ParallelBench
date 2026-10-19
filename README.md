@@ -1,2 +1,2 @@
 # ParallelBench
-Un framework experimental para comparar implementaciones secuenciales y paralelas, analizar su rendimiento y estudiar diferentes técnicas de optimización.  Copiar nombre
+Experimental CPU and GPU benchmarking framework for parallel computing research.
