@@ -6,6 +6,7 @@ import platform
 from time import get_clock_info
 from importlib.metadata import PackageNotFoundError, version
 import numpy as np
+import psutil
 from threadpoolctl import threadpool_info, threadpool_limits
 
 
@@ -26,7 +27,8 @@ def cpu_thread_context(pytorch, threads):
 def collect_environment(torch=None, pytorch=None):
     pytorch = pytorch if pytorch is not None else torch
     versions = {}
-    for package in ("parallelbench", "numpy", "pandas", "matplotlib", "torch", "threadpoolctl"):
+    for package in ("parallelbench", "numpy", "pandas", "matplotlib", "torch", "threadpoolctl",
+                    "numba", "llvmlite", "psutil"):
         try:
             versions[package] = version(package)
         except PackageNotFoundError:
@@ -41,6 +43,7 @@ def collect_environment(torch=None, pytorch=None):
     return {
         "os": platform.platform(), "machine": platform.machine(),
         "cpu": cpu or "unknown", "logical_cpu_count": os.cpu_count(),
+        "physical_cpu_count": psutil.cpu_count(logical=False),
         "python": platform.python_version(), "libraries": versions,
         "timer": vars(get_clock_info("perf_counter")),
         "pytorch": None if pytorch is None else {
@@ -52,7 +55,8 @@ def collect_environment(torch=None, pytorch=None):
         "numpy_config": config.getvalue(), "threadpools": threadpool_info(),
         "thread_environment": {key: os.environ.get(key) for key in
             ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "OMP_DYNAMIC", "MKL_DYNAMIC")},
+             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "OMP_DYNAMIC", "MKL_DYNAMIC",
+             "NUMBA_NUM_THREADS", "NUMBA_THREADING_LAYER")},
         "gpu": None if torch is None else {
             "name": torch.cuda.get_device_name(),
             "memory_bytes": torch.cuda.get_device_properties(0).total_memory,

@@ -8,11 +8,12 @@ version = "0.1.0"
 description = "Reproducible CPU and CUDA numerical benchmarks"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "pandas>=2", "matplotlib>=3.7", "threadpoolctl>=3.1"]
+dependencies = ["numpy>=1.24", "pandas>=2", "matplotlib>=3.7", "threadpoolctl>=3.1", "psutil>=5.9"]
 
 [project.optional-dependencies]
 cuda = ["torch>=2.1"]
 dev = ["pytest>=7"]
+scalability = ["numba>=0.67,<0.69"]
 
 [project.scripts]
 parallelbench = "parallelbench.cli:main"

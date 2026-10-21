@@ -5,7 +5,7 @@ import pandas as pd
 
 
 def ensure_output_available(directory):
-    for name in ("results.json", "results.csv", "trial_results.csv", "comparison.png"):
+    for name in ("results.json", "results.csv", "trial_results.csv", "comparison.png", "comparison.pdf"):
         path = Path(directory) / name
         if path.exists():
             raise FileExistsError(f"Refusing to overwrite {path}; choose a new output directory")

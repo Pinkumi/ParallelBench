@@ -63,6 +63,15 @@ def validate(actual, reference, config):
     np.testing.assert_allclose(actual, reference, rtol=config.rtol, atol=config.atol)
 
 
+def _make_inputs(config, size, trial):
+    """Trial zero preserves Phase 1 inputs; later trials use fresh deterministic inputs."""
+    seed = [config.seed, size] if trial == 0 else [config.seed, size, trial]
+    rng = np.random.default_rng(np.random.SeedSequence(seed))
+    a = rng.uniform(-1, 1, (size, size)).astype(np.float32)
+    b = rng.uniform(-1, 1, (size, size)).astype(np.float32)
+    return a, b, a.astype(np.float64) @ b.astype(np.float64)
+
+
 def _measure_backend(backend, functions, config, trial, size, name):
     rows = []
     sync = backend.synchronize if name == "cuda" else lambda: None
@@ -70,7 +79,7 @@ def _measure_backend(backend, functions, config, trial, size, name):
         for _ in range(config.warmup):
             function()
             sync()
-        batch_size = calibrate_cpu(function, config.min_cpu_sample_ms) if name == "cpu" else 1
+        batch_size = calibrate_cpu(function, config.min_cpu_sample_ms) if name != "cuda" else 1
         elapsed = measure(function, config.repetitions, sync, iterations_per_sample=batch_size)
         samples = [value / batch_size for value in elapsed]
         stats = summarize(samples)
@@ -96,27 +105,31 @@ def _attach_speedups(rows):
                               else None)
 
 
-def _aggregate(trial_rows, config):
+def _aggregate(trial_rows, config, *, group_fields=("size", "backend", "operation"),
+               attach_speedups=True):
     rows, warnings = [], []
-    keys = dict.fromkeys((r["size"], r["backend"], r["operation"]) for r in trial_rows)
-    for size, backend, operation in keys:
-        trials = [r for r in trial_rows if (r["size"], r["backend"], r["operation"]) ==
-                  (size, backend, operation)]
+    keys = dict.fromkeys(tuple(r[field] for field in group_fields) for r in trial_rows)
+    for key in keys:
+        dimensions = dict(zip(group_fields, key))
+        size, backend, operation = (dimensions[field] for field in ("size", "backend", "operation"))
+        trials = [r for r in trial_rows if tuple(r[field] for field in group_fields) == key]
         samples = [sample for row in trials for sample in row["samples_ms"]]
         stats = summarize(samples)
         trial_cv = summarize([r["median_ms"] for r in trials])["cv"]
         max_trial_cv = max(r["cv"] for r in trials)
         unstable = max(stats["cv"], trial_cv, max_trial_cv) > config.instability_threshold
-        row = {"size": size, "backend": backend, "operation": operation,
+        row = {**dimensions,
                "valid": True, "trial_count": len(trials), "trial_median_cv": trial_cv,
                "max_trial_cv": max_trial_cv, "unstable": unstable, **stats}
         rows.append(row)
         if unstable:
-            warnings.append(f"Unstable measurements: n={size} {backend} {operation}; "
+            thread_label = f" threads={dimensions['requested_threads']}" if "requested_threads" in dimensions else ""
+            warnings.append(f"Unstable measurements: n={size} {backend}{thread_label} {operation}; "
                             f"sample CV={stats['cv']:.1%}, trial-median CV={trial_cv:.1%}, "
                             f"maximum within-trial CV={max_trial_cv:.1%} "
                             f"(threshold={config.instability_threshold:.1%}). Raw samples retained.")
-    _attach_speedups(rows)
+    if attach_speedups:
+        _attach_speedups(rows)
     return rows, warnings
 
 
@@ -130,12 +143,7 @@ def _run_trials(config, torch, pytorch, reason):
         if config.randomize_order:
             order_rng.shuffle(sizes)
         for size in sizes:
-            # Trial zero preserves Phase 1 inputs. Later trials use fresh deterministic inputs.
-            seed = [config.seed, size] if trial == 0 else [config.seed, size, trial]
-            rng = np.random.default_rng(np.random.SeedSequence(seed))
-            a = rng.uniform(-1, 1, (size, size)).astype(np.float32)
-            b = rng.uniform(-1, 1, (size, size)).astype(np.float32)
-            reference = a.astype(np.float64) @ b.astype(np.float64)
+            a, b, reference = _make_inputs(config, size, trial)
             cpu = CPUBackend(a, b)
             gpu = CUDABackend(torch, a, b) if torch is not None else None
             names = ["cpu", "cuda"] if gpu is not None else ["cpu"]

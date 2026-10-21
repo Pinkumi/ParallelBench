@@ -14,6 +14,19 @@ class CPUBackend:
         return self.output
 
 
+class TorchCPUBackend:
+    """Optional optimized PyTorch CPU comparison using the same host inputs."""
+
+    def __init__(self, torch, a, b):
+        self.torch = torch
+        self.a, self.b = torch.from_numpy(a), torch.from_numpy(b)
+        self.output = torch.empty((a.shape[0], b.shape[1]), dtype=torch.float32, device="cpu")
+
+    def compute(self):
+        self.torch.mm(self.a, self.b, out=self.output)
+        return self.output
+
+
 class CUDABackend:
     def __init__(self, torch, a, b):
         self.torch = torch

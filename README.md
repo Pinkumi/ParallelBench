@@ -1,6 +1,6 @@
 # ParallelBench
 
-ParallelBench is an open-source research framework for reproducible comparisons of CPU and GPU numerical algorithms. Phases 1 and 2 benchmark dense square matrix multiplication using NumPy on the CPU and optional PyTorch CUDA on the GPU.
+ParallelBench is an open-source research framework for reproducible comparisons of CPU and GPU numerical algorithms. Phases 1 and 2 benchmark dense square matrix multiplication using NumPy on the CPU and optional PyTorch CUDA on the GPU. Phase 3 adds custom sequential and parallel Numba kernels for CPU scalability experiments.
 
 The goal is to understand how problem size, hardware, numerical precision, parallelism, and transfer overhead affect performance. Results are measurements of the local environment, not universal hardware rankings. This repository contains no invented experimental results.
 
@@ -69,10 +69,12 @@ Schema 2 retains the Phase 1 aggregate fields (`samples_ms`, `median_ms`, `std_m
 ```text
 src/parallelbench/
   backends.py       NumPy / optional PyTorch CUDA operations, timing, CPU calibration
-  engine.py         Trials, ordering, validation, statistics, instability warnings
+  engine.py         Shared trials, inputs, timing, validation, statistics, warnings
+  numba_backend.py  Optional sequential / row-parallel float32 loop kernels
+  scalability.py    Numba thread sweeps, two speedup baselines, efficiency
   hardware.py       CPU, GPU, OS, Python, libraries, BLAS and thread metadata
   export.py         CSV and JSON reports
-  visualization.py  Headless Matplotlib comparison graph
+  visualization.py  Headless CPU/CUDA and scalability comparisons
   cli.py            Command-line interface
 ```
 
@@ -128,9 +130,94 @@ Background load, CPU affinity, clocks, power mode, thermal state, drivers, opera
 
 The float64 reference and live CPU/GPU buffers require extra memory. Start with modest sizes on a 4 GB GTX 1650. Trials execute sequentially and do not retain device arrays from prior sizes. There is no automatic memory-size selection. No experimental performance claims are included in this README.
 
+## Phase 3: sequential and parallel CPU computing
+
+### Installation and environment compatibility
+
+Numba is optional, so the original CLI works without it. Install the scalability extra to use custom kernels and run their tests:
+
+```bash
+python -m pip install -e '.[dev,scalability]'
+python -c "import sys, numba, numpy; print(sys.version); print(numba.__version__, numpy.__version__)"
+```
+
+This phase was developed with Python 3.14.4, NumPy 2.5.4, Numba 0.68.0, and llvmlite 0.50.0 on native Ubuntu. The optional extra selects Numba `>=0.67,<0.69`, whose supported dependency ranges include this combination. Consult the [official Numba version support table](https://github.com/numba/numba/blob/main/docs/source/user/installing.rst#version-support-information) when changing Python or NumPy. Pip resolves the compatible NumPy/llvmlite dependencies. Do not force incompatible packages with `--no-deps`. `psutil` supplies portable physical core counts; an unavailable physical count is recorded as null rather than inferred from logical CPUs.
+
+### Sequential, parallel, and optimized implementations
+
+- `numba_sequential` uses `@njit(parallel=False, fastmath=False)` and explicit nested `i-k-j` loops. It initializes each output row and accumulates float32 products into a preallocated float32 output. There are no matrix multiplication APIs or BLAS calls inside this kernel.
+- `numba_parallel` uses `@njit(parallel=True, fastmath=False)` with `prange` over independent output rows. Arithmetic and C-contiguous input/output layouts match the sequential version. Every worker writes only its own rows, so no shared reduction or atomic operation is needed. Both kernels overwrite the output on every call.
+- `cpu` retains the existing optimized NumPy/BLAS backend. NumPy may use multiple threads, vectorization, and cache blocking. It is not a sequential baseline.
+- `torch_cpu` is an optional optimized CPU comparison, enabled with `--include-torch-cpu`. It requires installed PyTorch; requesting it without PyTorch fails explicitly.
+- `cuda` retains the existing PyTorch CUDA backend, with synchronized computation, separate transfers, and directly measured end-to-end timing. No custom CUDA kernel is introduced.
+
+JIT compilation converts Python loop code to native machine code. Before any benchmark or calibration samples, both Numba kernels compile using small C-contiguous float32 buffers and initialize the threading runtime. Shapes do not change the signatures used in this experiment. Each measured configuration then receives its own output allocation and actual-size warm-up, all outside timing. Compilation and process startup costs are not reported as execution latency. Timed Numba calls include Python dispatcher overhead and the output zeroing needed by the algorithm; they do not allocate result arrays. `fastmath=False` avoids enabling unsafe floating-point reassociation. NumPy/GPU libraries may still use different reduction orders.
+
+### Thread sweep and reproducibility
+
+`--scalability` activates Phase 3; omitting it preserves the original benchmark behavior and default sizes. The scalability defaults are matrix sizes `128 256 512 1024` and Numba thread counts `1 2 4 8 16`. Larger sizes can be passed with `--sizes`.
+
+`--numba-threads` controls Numba separately from `--cpu-threads`, which sets the fixed NumPy/BLAS and optional PyTorch CPU comparison limit. The NumPy reference and optimized CPU measurements run within that control context; Numba configurations use their own temporary thread masks. Counts are checked against `numba.config.NUMBA_NUM_THREADS` before compilation. An explicit count above capacity is rejected, not silently reduced. If your environment supports fewer than 16 threads, pass a valid sweep, for example `--numba-threads 1 2 4 8`. Include one thread to measure the parallel-one-thread baseline. Prior Numba and library thread settings are restored after each configuration, including failures.
+
+The Ryzen 7 5800H has eight physical cores and sixteen logical CPUs; SMT threads share core resources. The framework records detected hardware rather than relying on that target description. A sixteen-thread run is not assumed to be faster than an eight-thread run. Numba's `actual_numba_threads` field records `get_num_threads()` inside the measurement context: the configured active runtime mask, not an operating system observation of simultaneously busy workers. The runtime threading layer (such as TBB, OpenMP, or workqueue), capacity, requested mask, actual mask, `NUMBA_NUM_THREADS`, and `NUMBA_THREADING_LAYER` are recorded. Libraries and virtual machines may expose different capacities.
+
+All implementations and thread counts for a size/trial receive equivalent input values. The existing seeded input generator, float64 NumPy oracle, tolerances, and timing utilities are reused. A separately computed float32 NumPy oracle also validates every configuration. The timed NumPy backend remains a real measurement rather than the untimed validation product. Optional randomization shuffles sizes and the full list of backend/thread configurations, and exports the actual sequence. It does not change seeds or input values. Each trial recreates inputs and buffers but shares the process/runtime caches as described in Phase 2.
+
+CPU batching, raw batch durations, per-call normalization, statistics, and CV instability detection are reused. Thread counts remain distinct aggregation groups. Every trial and configuration preserves its samples, including outliers. The physical/logical CPU counts, thread configuration, matrix shape, float32 dtype, versions, OS, seed, warm-up, repetitions, and trial count are included in the JSON/CSV report. The original sample timing and variability limitations also apply to these experiments.
+
+### Speedup and efficiency
+
+For each matrix size, let `Tseq` be the custom sequential median, `Tpar(p)` the parallel median with `p` configured Numba threads, and `Tpar(1)` its one-thread median:
+
+```text
+speedup_vs_sequential(p)          = Tseq / Tpar(p)
+parallel_efficiency(p)            = speedup_vs_sequential(p) / p
+speedup_vs_parallel_one_thread(p) = Tpar(1) / Tpar(p)
+efficiency_vs_parallel_one_thread = speedup_vs_parallel_one_thread(p) / p
+```
+
+The baselines are measured independently. A parallel kernel running with one thread can have different dispatch, scheduling, or compiler overhead from a sequential kernel. Speedup relative to `parallel(1)` must therefore not be interpreted as sequential speedup. Efficiency is a dimensionless ratio; multiply by 100 for a percentage. Superlinear values can arise from compiler, cache, and baseline effects and do not establish ideal hardware scaling. Only parallel Numba configurations receive a parallel efficiency value; optimized library operations do not have an equivalent known worker count merely because they expose thread limits.
+
+Per-trial metrics use that trial's medians; aggregate metrics use pooled normalized sample medians, as in Phase 2. Explicit `speedup_vs_sequential` is provided for all compute backends. The legacy `speedup`, `compute_speedup`, and `end_to_end_speedup` fields keep their NumPy/CUDA meanings for `cpu` and `cuda`; `speedup` on Numba or PyTorch CPU rows refers to the custom sequential baseline. Use the explicit baseline fields for comparisons across implementations.
+
+### Reproducing the experiments on Ubuntu / Ryzen 7 5800H
+
+From the repository root, with its virtual environment already created:
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,scalability]'
+.venv/bin/python -m pytest -q -rs
+
+# Small real CPU experiment; choose a new output directory on every invocation.
+.venv/bin/python -m parallelbench --scalability --device cpu \
+  --sizes 128 256 --numba-threads 1 2 4 8 16 --cpu-threads 1 \
+  --warmup 2 --repetitions 5 --trials 3 --randomize-order --seed 42 \
+  --output results/phase3-cpu-small-001
+
+# Full CPU sweep, with a fixed eight-thread optimized-library comparison.
+.venv/bin/python -m parallelbench --scalability --device cpu \
+  --sizes 128 256 512 1024 --numba-threads 1 2 4 8 16 --cpu-threads 8 \
+  --warmup 5 --repetitions 20 --trials 5 --randomize-order --seed 42 \
+  --output results/phase3-5800h-cpu-001
+
+# With existing CUDA-enabled PyTorch: include optimized PyTorch CPU and CUDA.
+.venv/bin/python -m parallelbench --scalability --device cuda --include-torch-cpu \
+  --sizes 128 256 512 1024 --numba-threads 1 2 4 8 16 --cpu-threads 8 \
+  --warmup 5 --repetitions 20 --trials 5 --randomize-order --seed 42 \
+  --output results/phase3-5800h-cuda-001
+```
+
+Use `--device auto` to include CUDA when available and record a skip reason otherwise. `--device cpu` never probes CUDA. The new mode produces schema version 3 with `experiment="cpu_scalability"`, retaining `results.json`, `results.csv`, `trial_results.csv`, and `comparison.png`. It also produces vector `comparison.pdf`. The five graph panels show latency vs threads, both speedup baselines, efficiency, custom kernels vs optimized CPU libraries, and CPU vs CUDA compute when available. Ideal linear speedup/efficiency references are theoretical lines, not measured results. MAD bars describe dispersion, not confidence intervals. A context panel records hardware, settings, and warning count.
+
+The full sweep commands above are reproduction instructions, not a claim that every listed research run has already been performed. Check your local output reports for executed configurations. Tests without the Numba extra skip the Phase 3 module; CUDA tests skip when unavailable. Neither condition counts as a successful execution of those tests.
+
+### Limitations
+
+These simple loop kernels are not tiled or tuned to match optimized BLAS. An experiment compares algorithm/compiler/library combinations as well as parallelism. Report both Numba baselines, the actual environment, and NumPy's effective thread settings. Batches repeatedly reuse resident inputs and can smooth short outliers; samples are steady-state batch averages rather than cold-cache observations. Small matrices can be dominated by dispatch/scheduling costs. More logical threads may reduce performance. Random ordering and CV warnings do not control thermal state, clocks, affinity, other workloads, or SMT sharing. Independent process trials, confidence intervals, hardware counters, and cache-blocked kernels remain future work.
+
 ## Research objectives and roadmap
 
-Phase 1 establishes validated float32 matrix multiplication and reproducible exports. Phase 2 adds CPU batch timing, controlled thread counts, repeated trials, randomized ordering, directly measured CUDA end-to-end latency, and instability warnings. Future development will investigate:
+Phase 1 establishes validated float32 matrix multiplication and reproducible exports. Phase 2 adds CPU batch timing, controlled thread counts, repeated trials, randomized ordering, directly measured CUDA end-to-end latency, and instability warnings. Phase 3 adds validated Numba kernels, multicore thread sweeps, dual speedup baselines, and parallel efficiency. Future development will investigate:
 
 1. CPU affinity, systematic BLAS thread scaling, and additional parallel CPU algorithms.
 2. Custom CUDA kernels and comparison with library implementations.

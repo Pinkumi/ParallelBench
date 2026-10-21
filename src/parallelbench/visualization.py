@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 
 
 def plot_results(report, directory):
+    if report.get("experiment") == "cpu_scalability":
+        return plot_scalability_results(report, directory)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "comparison.png"
@@ -43,3 +45,103 @@ def plot_results(report, directory):
         return path
     finally:
         plt.close(fig)
+
+
+def plot_scalability_results(report, directory):
+    """Five measured comparisons and experiment context; PDF preserves vector lines."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / 'comparison.png'
+    pdf_path = path.with_suffix('.pdf')
+    for target in (path, pdf_path):
+        if target.exists():
+            raise FileExistsError(f'Refusing to overwrite {target}; choose a new output directory')
+    rows = [row for row in report['results'] if row['operation'] == 'compute']
+    parallel = [row for row in rows if row['backend'] == 'numba_parallel']
+    counts = sorted({row['actual_numba_threads'] for row in parallel})
+    sizes = sorted({row['size'] for row in rows})
+    with plt.rc_context({'font.size': 9, 'axes.grid': True, 'grid.alpha': 0.25}):
+        fig, axes = plt.subplots(3, 2, figsize=(13, 13))
+        try:
+            latency, speedup, efficiency = axes[0, 0], axes[0, 1], axes[1, 0]
+            for index, size in enumerate(sizes):
+                group = sorted((row for row in parallel if row['size'] == size),
+                               key=lambda row: row['actual_numba_threads'])
+                threads = [row['actual_numba_threads'] for row in group]
+                color = f'C{index % 10}'
+                latency.errorbar(threads, [row['median_ms'] for row in group],
+                    yerr=[row['mad_ms'] for row in group], marker='o', color=color, label=f'n={size} parallel')
+                sequential = next(row['median_ms'] for row in rows
+                                  if row['backend'] == 'numba_sequential' and row['size'] == size)
+                latency.axhline(sequential, linestyle='--', color=color, alpha=0.6,
+                                label=f'n={size} sequential')
+                for field, label, style in (
+                        ('speedup_vs_sequential', 'vs sequential', '-'),
+                        ('speedup_vs_parallel_one_thread', 'vs parallel(1)', '--')):
+                    speedup.plot(threads, [row[field] for row in group], marker='o', linestyle=style,
+                                 color=color, label=f'n={size} {label}')
+                efficiency.plot(threads, [row['parallel_efficiency'] for row in group],
+                                marker='o', color=color, label=f'n={size} vs sequential')
+                efficiency.plot(threads, [row['efficiency_vs_parallel_one_thread'] for row in group],
+                                linestyle='--', color=color, label=f'n={size} vs parallel(1)')
+            speedup.plot(counts, counts, color='black', linestyle=':', label='Ideal linear speedup = p')
+            efficiency.axhline(1, color='black', linestyle=':', label='Ideal efficiency = 1')
+            latency.set(title='Execution latency vs Numba threads', xlabel='Configured Numba threads',
+                        ylabel='Median latency (ms; ± MAD)', yscale='log')
+            speedup.set(title='Parallel speedup: two measured baselines', xlabel='Configured Numba threads',
+                        ylabel='Baseline median / parallel median')
+            efficiency.set(title='Parallel efficiency', xlabel='Configured Numba threads',
+                           ylabel='Speedup / threads')
+            for axis in (latency, speedup, efficiency):
+                axis.set_xticks(counts)
+                axis.legend(fontsize=7)
+
+            comparison, gpu = axes[1, 1], axes[2, 0]
+            labels = {'numba_sequential': 'Numba sequential', 'cpu': 'NumPy (BLAS)',
+                      'torch_cpu': 'PyTorch CPU', 'cuda': 'CUDA compute'}
+            for backend in ('numba_sequential', 'numba_parallel', 'cpu', 'torch_cpu', 'cuda'):
+                variants = counts if backend == 'numba_parallel' else [None]
+                for threads in variants:
+                    group = sorted((row for row in rows if row['backend'] == backend and
+                                    (threads is None or row['actual_numba_threads'] == threads)),
+                                   key=lambda row: row['size'])
+                    if not group:
+                        continue
+                    label = f'Numba parallel ({threads} threads)' if threads is not None else labels[backend]
+                    if backend != 'cuda':
+                        comparison.errorbar([r['size'] for r in group], [r['median_ms'] for r in group],
+                            yerr=[r['mad_ms'] for r in group], marker='o', label=label)
+                    if backend in ('cpu', 'torch_cpu', 'cuda'):
+                        gpu.errorbar([r['size'] for r in group], [r['median_ms'] for r in group],
+                            yerr=[r['mad_ms'] for r in group], marker='o', label=label)
+            comparison.set(title='Custom kernels vs optimized CPU libraries',
+                           xlabel='Square matrix dimension', ylabel='Median latency (ms; ± MAD)', yscale='log')
+            gpu.set(title='CPU vs CUDA compute (transfers excluded)', xlabel='Square matrix dimension',
+                    ylabel='Median latency (ms; ± MAD)', yscale='log')
+            comparison.legend(fontsize=7)
+            gpu.legend(fontsize=7)
+            if not any(row['backend'] == 'cuda' for row in rows):
+                gpu.text(0.5, 0.9, 'CUDA not measured', ha='center', transform=gpu.transAxes)
+            settings, environment = report['settings'], report['environment']
+            info = axes[2, 1]
+            info.axis('off')
+            lines = [environment['cpu'],
+                     f"Physical cores: {environment['physical_cpu_count']}; logical CPUs: {environment['logical_cpu_count']}",
+                     f"Numba layer: {environment['numba']['threading_layer']}",
+                     f"Numba thread capacity: {environment['numba']['max_threads']}",
+                     f"NumPy / PyTorch CPU requested threads: {settings['cpu_threads']}",
+                     f"Trials: {settings['trials']}; repetitions: {settings['repetitions']}; warm-up: {settings['warmup']}",
+                     f"CPU batch calibration target: {settings['min_cpu_sample_ms']} ms",
+                     f"Seed: {settings['seed']}; randomized order: {settings['randomize_order']}",
+                     f"Warnings: {len(report['warnings'])}; all raw samples retained",
+                     'MAD bars show dispersion, not confidence intervals.',
+                     'Full environment and samples: accompanying CSV / JSON.']
+            info.text(0, 0.95, '\n\n'.join(lines), va='top', fontsize=9)
+            fig.suptitle(f"ParallelBench CPU scalability · float32 · {report['timestamp_utc']}", fontsize=12)
+            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            for target, format_name in ((path, 'png'), (pdf_path, 'pdf')):
+                with target.open('xb') as output:
+                    fig.savefig(output, format=format_name, dpi=200)
+            return path
+        finally:
+            plt.close(fig)
