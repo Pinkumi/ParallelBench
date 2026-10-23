@@ -25,9 +25,12 @@ def gpu_inventory():
     if process.returncode:
         return [], 'nvidia-smi could not communicate with the driver'
     try:
+        rows = list(csv.reader(process.stdout.splitlines()))
+        if any(len(row) != 4 for row in rows):
+            return [], 'Unable to parse NVIDIA driver inventory'
         devices = [dict(index=int(row[0]), name=row[1].strip(), driver_version=row[2].strip(),
                         memory_bytes=int(float(row[3])) * 1024 ** 2)
-                   for row in csv.reader(process.stdout.splitlines()) if len(row) == 4]
+                   for row in rows]
     except ValueError:
         return [], 'Unable to parse NVIDIA driver inventory'
     return devices, 'available'

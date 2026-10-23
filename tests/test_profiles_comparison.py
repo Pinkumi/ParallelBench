@@ -98,6 +98,18 @@ def test_compare_cli(tmp_path):
                  '--output', str(tmp_path / 'comparison')]) == 0
 
 
+def test_incomplete_driver_inventory_reports_parse_error(monkeypatch):
+    gpu_inventory.cache_clear()
+    monkeypatch.setattr('parallelbench.hardware.subprocess.run', lambda *args, **kwargs:
+        SimpleNamespace(returncode=0, stdout='0, NVIDIA GTX 1650, 595.91.07\n'))
+    try:
+        devices, status = gpu_inventory()
+        assert devices == []
+        assert status == 'Unable to parse NVIDIA driver inventory'
+    finally:
+        gpu_inventory.cache_clear()
+
+
 def test_driver_inventory_and_metadata(monkeypatch):
     gpu_inventory.cache_clear()
     monkeypatch.setattr('parallelbench.hardware.subprocess.run', lambda *args, **kwargs:
