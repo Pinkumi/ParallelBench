@@ -37,7 +37,7 @@ class CUDABackend:
         self.a = torch.empty(a.shape, dtype=torch.float32, device=self.device)
         self.b = torch.empty(b.shape, dtype=torch.float32, device=self.device)
         self.output = torch.empty((a.shape[0], b.shape[1]), dtype=torch.float32, device=self.device)
-        self.host_output = torch.empty(self.output.shape, dtype=torch.float32)
+        self.host_output = torch.empty(self.output.shape, dtype=torch.float32, device='cpu')
         self.upload()
 
     def synchronize(self):

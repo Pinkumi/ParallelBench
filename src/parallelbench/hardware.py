@@ -3,11 +3,34 @@ import contextlib
 import io
 import os
 import platform
+import csv
+import subprocess
+from functools import lru_cache
 from time import get_clock_info
 from importlib.metadata import PackageNotFoundError, version
 import numpy as np
 import psutil
 from threadpoolctl import threadpool_info, threadpool_limits
+
+
+@lru_cache(maxsize=1)
+def gpu_inventory():
+    """Read driver/device inventory without initializing a CUDA compute context."""
+    try:
+        process = subprocess.run(['nvidia-smi', '--query-gpu=index,name,driver_version,memory.total',
+                                  '--format=csv,noheader,nounits'], capture_output=True,
+                                 text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], f'nvidia-smi unavailable: {exc}'
+    if process.returncode:
+        return [], 'nvidia-smi could not communicate with the driver'
+    try:
+        devices = [dict(index=int(row[0]), name=row[1].strip(), driver_version=row[2].strip(),
+                        memory_bytes=int(float(row[3])) * 1024 ** 2)
+                   for row in csv.reader(process.stdout.splitlines()) if len(row) == 4]
+    except ValueError:
+        return [], 'Unable to parse NVIDIA driver inventory'
+    return devices, 'available'
 
 
 @contextlib.contextmanager
@@ -28,7 +51,7 @@ def collect_environment(torch=None, pytorch=None):
     pytorch = pytorch if pytorch is not None else torch
     versions = {}
     for package in ("parallelbench", "numpy", "pandas", "matplotlib", "torch", "threadpoolctl",
-                    "numba", "llvmlite", "psutil"):
+                    "numba", "llvmlite", "psutil", "cupy-cuda12x", "cupy-cuda13x"):
         try:
             versions[package] = version(package)
         except PackageNotFoundError:
@@ -40,10 +63,20 @@ def collect_environment(torch=None, pytorch=None):
     if not cpu and os.path.exists("/proc/cpuinfo"):
         with open("/proc/cpuinfo", encoding="utf-8") as source:
             cpu = next((line.split(":", 1)[1].strip() for line in source if line.startswith("model name")), "unknown")
+    inventory, inventory_status = gpu_inventory()
+    memory = psutil.virtual_memory()
+    try:
+        affinity = psutil.Process().cpu_affinity()
+    except (AttributeError, psutil.Error, OSError):
+        affinity = None
     return {
         "os": platform.platform(), "machine": platform.machine(),
         "cpu": cpu or "unknown", "logical_cpu_count": os.cpu_count(),
         "physical_cpu_count": psutil.cpu_count(logical=False),
+        "cpu_affinity": affinity,
+        "system_memory": {"total_bytes": memory.total, "available_bytes": memory.available},
+        "is_wsl": 'microsoft' in platform.release().lower(),
+        "gpu_inventory": inventory, "gpu_inventory_status": inventory_status,
         "python": platform.python_version(), "libraries": versions,
         "timer": vars(get_clock_info("perf_counter")),
         "pytorch": None if pytorch is None else {

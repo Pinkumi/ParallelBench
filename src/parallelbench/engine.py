@@ -23,8 +23,11 @@ class BenchmarkConfig:
     randomize_order: bool = False
     min_cpu_sample_ms: float = 5.0
     instability_threshold: float = 0.10
+    profile: str | None = None
 
     def __post_init__(self):
+        if self.profile not in (None, 'quick', 'standard', 'research'):
+            raise ValueError('Unknown experiment profile')
         if not self.sizes or any(type(n) is not int or n <= 0 for n in self.sizes):
             raise ValueError("Matrix sizes must be positive integers")
         if type(self.warmup) is not int or self.warmup < 1:
@@ -123,7 +126,8 @@ def _aggregate(trial_rows, config, *, group_fields=("size", "backend", "operatio
                "max_trial_cv": max_trial_cv, "unstable": unstable, **stats}
         rows.append(row)
         if unstable:
-            thread_label = f" threads={dimensions['requested_threads']}" if "requested_threads" in dimensions else ""
+            thread_label = ''.join(f' {field}={dimensions[field]}' for field in
+                ('requested_threads', 'variant', 'precision', 'timer') if field in dimensions)
             warnings.append(f"Unstable measurements: n={size} {backend}{thread_label} {operation}; "
                             f"sample CV={stats['cv']:.1%}, trial-median CV={trial_cv:.1%}, "
                             f"maximum within-trial CV={max_trial_cv:.1%} "

@@ -1,5 +1,7 @@
 # ParallelBench
 
+Version **1.0.0** source candidate for reproducible numerical computing research. No GitHub release or tag is created automatically.
+
 ParallelBench is an open-source research framework for reproducible comparisons of CPU and GPU numerical algorithms. Phases 1 and 2 benchmark dense square matrix multiplication using NumPy on the CPU and optional PyTorch CUDA on the GPU. Phase 3 adds custom sequential and parallel Numba kernels for CPU scalability experiments.
 
 The goal is to understand how problem size, hardware, numerical precision, parallelism, and transfer overhead affect performance. Results are measurements of the local environment, not universal hardware rankings. This repository contains no invented experimental results.
@@ -74,7 +76,13 @@ src/parallelbench/
   scalability.py    Numba thread sweeps, two speedup baselines, efficiency
   hardware.py       CPU, GPU, OS, Python, libraries, BLAS and thread metadata
   export.py         CSV and JSON reports
-  visualization.py  Headless CPU/CUDA and scalability comparisons
+  cupy_backend.py   Optional NVRTC kernels and explicit cuBLAS precision contracts
+  kernels/matmul.cu Naive and shared-memory tiled CUDA C kernels
+  experiments.py    CPU/custom CUDA/PyTorch/cuBLAS experiments
+  precision.py      Accuracy metrics, precision policies, buffer accounting
+  comparison.py     Strict JSON/CSV cross-run compatibility and ratios
+  profiles.py       Reproducible quick, standard, research presets
+  visualization.py  Headless comparisons and vector PDF export
   cli.py            Command-line interface
 ```
 
@@ -214,6 +222,116 @@ The full sweep commands above are reproduction instructions, not a claim that ev
 ### Limitations
 
 These simple loop kernels are not tiled or tuned to match optimized BLAS. An experiment compares algorithm/compiler/library combinations as well as parallelism. Report both Numba baselines, the actual environment, and NumPy's effective thread settings. Batches repeatedly reuse resident inputs and can smooth short outliers; samples are steady-state batch averages rather than cold-cache observations. Small matrices can be dominated by dispatch/scheduling costs. More logical threads may reduce performance. Random ordering and CV warnings do not control thermal state, clocks, affinity, other workloads, or SMT sharing. Independent process trials, confidence intervals, hardware counters, and cache-blocked kernels remain future work.
+
+## Phases 4–7: CUDA, precision, multiple computers, and version 1.0
+
+The supported algorithm is dense matrix multiplication. CLI runs use square sizes; the custom CUDA and Numba kernels also support compatible rectangular matrices through their Python backend APIs. There is no GUI, Docker requirement, cloud service, or automatic code optimizer. [The research report](docs/research_report.md) contains measured laptop results, archived inputs/metadata, actual graphs, and explicitly pending desktop experiments.
+
+### Optional CUDA tooling
+
+CPU-only installation and the original CLI remain available with `pip install -e '.[dev,scalability]'`. Custom kernels need one CuPy package matching the CUDA major version, a compatible NVIDIA driver, and NVRTC/runtime headers. For the existing CUDA 13 environment:
+
+```bash
+python -m pip install -e '.[dev,scalability,cuda,custom-cuda13]'
+python -c "import cupy; cupy.show_config()"
+```
+
+Use `custom-cuda12` instead of `custom-cuda13` with CUDA 12. **Install only one CuPy CUDA variant.** Follow the [official CuPy installation guide](https://docs.cupy.dev/en/stable/install.html). If a system toolkit or PyTorch's NVIDIA component wheels do not supply the runtime, NVRTC, and headers, CuPy's optional `cupy-cuda13x[ctk]` (or `cupy-cuda12x[ctk]`) installation supplies toolkit components. Do not replace working driver/toolkit versions merely to run CPU experiments. A system `nvcc` executable is not necessary: readable CUDA C source is shipped in the Python package and compiled with NVRTC outside measurements.
+
+### Custom CUDA methodology
+
+```bash
+parallelbench --custom-cuda --profile quick --device cuda \
+  --blocks 8x8 16x16 32x8 --tiles 8 16 32 --output results/laptop-kernels-quick-001
+```
+
+The naive kernel assigns one output element per thread. The tiled kernel cooperatively loads two shared-memory tiles, synchronizes all threads before and after using them, and zero-pads boundary tiles. No thread exits before a barrier. Both use FP32 fused multiply-add and validate against the same float64 reference. Tile sizes 8, 16, and 32 consume respectively 512, 2048, and 8192 shared-memory bytes per block. Thread/block dimensions, compiled kernel thread limits, registers, grids, and device shared-memory limits are checked or recorded. Unsupported configurations fail explicitly. A larger tile is not assumed to be faster.
+
+The experiment compares custom naive/tiled kernels, NumPy, optional Numba sequential, PyTorch CUDA when available, and cuBLAS through CuPy. Compilation, initialization, allocation, reference generation, warm-up, and allocator cleanup are untimed. Live GPU buffers are checked against `--gpu-memory-fraction` (default 0.5 of currently free device memory). The check does not predict all library workspaces or prevent interference from other processes. Defaults are conservative; large sizes remain the user's choice.
+
+Every GPU case records synchronized host-wall samples for upload, resident-input compute, download, and directly measured end-to-end execution. Separate compute samples use events on the same GPU stream. `timer=host_wall` and `timer=cuda_event` are different boundaries. Event elapsed time measures the GPU stream interval; on tiny operations it can include scheduling/host enqueue gaps and is not an instruction-level profiler measurement. Event objects are initialized before sampling. Events exclude transfer operations in this experiment. **CPU speedup is calculated only against host-wall GPU compute or end-to-end time.** GPU event speedups use other GPU event samples. The naive baseline is the first block configuration in the saved settings, not whichever configuration happens to execute first or finish fastest.
+
+### Numerical precision contracts
+
+```bash
+parallelbench --precision-study --profile quick --device auto \
+  --precisions float32 float16 float64 mixed --output results/laptop-precision-quick-001
+```
+
+The legacy `--precision float32` retains its original meaning. New precision sweeps use `--precisions`. All modes derive from the same float32 master inputs and float64 reference. FP16 modes quantize those input values, so errors include input quantization. FP64 represents the same master values exactly; the experiment does not create extra information by converting FP32 inputs to FP64.
+
+| Backend / mode | Input storage | Multiplication / accumulation contract | Output |
+| --- | --- | --- | --- |
+| cuBLAS FP16 | FP16 | Pedantic FP16 compute / FP16 accumulation | FP16 |
+| cuBLAS FP32 | FP32 | Pedantic FP32 compute / FP32 accumulation | FP32 |
+| cuBLAS FP64 | FP64 | Pedantic FP64 compute / FP64 accumulation | FP64 |
+| cuBLAS mixed | FP16 | Pedantic FP32 compute / FP32 accumulation | FP32 |
+| NumPy FP32 / FP64 | Same as mode | Same precision GEMM | Same as mode |
+| NumPy FP16 **emulation** | FP16 | Inputs preconverted to FP32; FP32 GEMM; timed FP16 output rounding | FP16 |
+| NumPy mixed storage | FP16 | Inputs preconverted to FP32; FP32 GEMM | FP32 |
+
+The CPU FP16 path is explicitly an emulation and does not claim native FP16 arithmetic or FP16 CPU speedup. Conversion buffers are included in memory accounting. Native GPU modes are capability-probed by a real untimed GEMM; cuBLAS `NOT_SUPPORTED` / `ARCH_MISMATCH` cases are recorded in `skipped`, without substituting another mode. Unexpected errors fail the run. Pedantic policies prioritize explicit arithmetic contracts rather than claiming the fastest possible tensor-core path. FP64 or FP16 support does not imply efficient execution on either GPU.
+
+Accuracy records maximum absolute error, mean absolute error, relative Frobenius error, and RMSE against float64. For a zero reference, zero error gives relative error zero; nonzero error gives JSON null and `relative_error_defined=false`, avoiding division by zero or a fabricated finite error. Each trial preserves its accuracy record. Aggregate maximum absolute error is the maximum over trials; mean absolute and relative errors are means over trials; aggregate RMSE is the root mean of squared per-trial RMSE values.
+
+Implementation sanity is checked against an entrywise rounding bound on quantized inputs, using `gamma_k = k*eps/(1-k*eps)` plus output rounding and float64 reference rounding. Machine epsilon rather than half epsilon makes this bound conservative. If `k*eps >= 1`, the standard bound is not useful: finiteness is checked and a warning/flag records the limitation. A separate `accuracy_within_tolerance` compares against the requested `--rtol`/`--atol` on original inputs. Exceeding that accuracy target produces a warning and retains the precision measurements; it does not imply that a correctly rounded low-precision algorithm was replaced or silently promoted.
+
+Memory metrics report bytes of live host/device buffers, including CPU conversion scratch. They exclude runtime contexts, allocator reserves, and library workspaces; they are not peak process/VRAM telemetry. Precision graphs show host latency, separate CUDA-event elapsed time, numerical error, and buffer bytes. Performance ratios relative to FP32 match backend, operation, and timer.
+
+### Profiles and equivalent multi-device experiments
+
+| Profile | Sizes | Warm-up | Repetitions | Trials | CPU threads | CPU batch target |
+| --- | --- | --- | --- | --- | --- | --- |
+| `quick` | 32, 64 | 2 | 5 | 2 | 1 | 1 ms |
+| `standard` | 128, 256, 512, 1024 | 3 | 20 | 3 | 1 | 5 ms |
+| `research` | 128, 256, 512, 1024 | 5 | 50 | 7 | 1 | 10 ms |
+
+Profiles enable seeded randomized order. Explicit flags override profile values, and all resolved settings are saved. Without `--profile`, previous defaults remain unchanged. Standard/research scalability profiles use Numba threads 1, 2, 4, 8, which fit both target systems' logical capacity; hardware capacity is still checked. Use the same explicit sweep on each machine. `--no-randomize-order` is available when fixed ordering is part of the experiment.
+
+Environment records include physical/logical CPUs, affinity where available, system RAM, OS/WSL detection, Python and libraries, CUDA runtime, GPU memory, and NVIDIA driver/device inventory. Missing/inaccessible `nvidia-smi` is recorded as an inventory status, not a benchmark success or proof that no GPU exists. GPU compute information is also recorded through the active library. Thread counts represent configured limits rather than observations of simultaneously busy workers.
+
+After creating a virtual environment and installing compatible optional GPU packages **on each computer**, run identical commands, changing only output directory names:
+
+```bash
+# Native Ubuntu laptop
+parallelbench --custom-cuda --profile standard --device cuda --seed 42 \
+  --blocks 8x8 16x16 32x8 --tiles 8 16 32 --output results/laptop-kernels-standard-001
+parallelbench --precision-study --profile standard --device cuda --seed 42 \
+  --precisions float32 float16 float64 mixed --output results/laptop-precision-standard-001
+parallelbench --scalability --profile standard --device cpu --seed 42 \
+  --numba-threads 1 2 4 8 --output results/laptop-cpu-standard-001
+
+# Ubuntu WSL2 desktop, executed manually when it is accessible
+parallelbench --custom-cuda --profile standard --device cuda --seed 42 \
+  --blocks 8x8 16x16 32x8 --tiles 8 16 32 --output results/desktop-kernels-standard-001
+parallelbench --precision-study --profile standard --device cuda --seed 42 \
+  --precisions float32 float16 float64 mixed --output results/desktop-precision-standard-001
+parallelbench --scalability --profile standard --device cpu --seed 42 \
+  --numba-threads 1 2 4 8 --output results/desktop-cpu-standard-001
+
+# Copy the real source reports to the same computer before comparing them.
+parallelbench --compare results/laptop-kernels-standard-001/results.json \
+  results/desktop-kernels-standard-001/results.csv --labels GTX1650 RTX3060Ti \
+  --output results/cross-device-kernels-standard-001
+```
+
+WSL2 requires a working compatible Windows NVIDIA driver; no assumption is made that the desktop is currently accessible. For CPU-only systems use `--device cpu`; `--device auto` records omitted GPU cases when CUDA/CuPy is unavailable. `research` is a longer campaign; finish quick validation before running it. Old output directories are never overwritten.
+
+The comparison loader accepts original aggregate JSON or `results.csv`, including earlier schemas. It checks algorithms, sizes, precision contracts, requested thread masks, operation, timer boundary, seed, warm-up, repetitions, trials, CPU limits, order policy, and batch methodology before reporting a ratio. Different profiles can match only if their concrete settings match. Calibrated batch sizes may differ by hardware; comparisons remain averages under the same batch calibration policy. Incompatible settings generate warnings and no ratios. Missing cases, invalid numerical results, and unstable sources are identified. A comparison of the same run's JSON and CSV is labeled a format roundtrip, not a hardware experiment. Changed library/OS/hardware environments are retained and warned about: cross-device ratios describe entire setups and do not isolate hardware alone.
+
+`relative_speedup = baseline_latency / candidate_latency`; values above one favor the candidate. `latency_change_percent = (candidate_latency / baseline_latency - 1)*100`; negative values mean lower latency. Input files are never edited, and comparison reports retain source paths and SHA-256 hashes. **RTX 3060 Ti results and its comparison graph remain pending until that machine is actually measured.**
+
+### Version 1.0 validation and release checklist
+
+```bash
+python -m pytest -q -rs
+python -m build
+parallelbench --version
+```
+
+The wheel and source distribution must include `parallelbench/kernels/matmul.cu`. CPU CI is configured for Ubuntu and Windows with Python 3.12/3.14; CUDA tests explicitly skip without a usable GPU. A CI definition is not a claim that those remote jobs have already run. Local CUDA tests require the optional CuPy variant and GPU access. No skipped GPU test counts as a successful CUDA execution.
+
+Before publishing a release, run the standard/research profiles on both real computers, inspect variability/accuracy warnings, archive the reports, compare equivalent configurations, review CI/build results, choose an appropriate project license, and review/commit the changes. Creation of a GitHub tag or release is a separate manual action. No desktop measurement, universal speedup, or AI optimization result is claimed by this source candidate.
 
 ## Research objectives and roadmap
 

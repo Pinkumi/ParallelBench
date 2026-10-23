@@ -10,3 +10,9 @@
 - Preserve seeds, settings, environment metadata, and raw timing samples in exports.
 - NumPy may use multithreaded BLAS; record thread pools and environment settings.
 - Do not commit generated results or push without explicit user instructions.
+- Version 1.0 adds optional CuPy CUDA C sources; include kernels/*.cu in built packages.
+- Keep CUDA-event and host-wall samples separate; never mix their speedup baselines.
+- Precision contracts must state input, multiplication, accumulation, and output dtypes.
+- CPU FP16 storage emulation must remain explicitly labeled, including conversion buffers.
+- Cross-device ratios require matching settings, algorithms, precision contracts, and timing boundaries.
+- Never create desktop/RTX 3060 Ti results before a real desktop execution.

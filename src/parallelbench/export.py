@@ -22,7 +22,7 @@ def export_results(report, directory):
                 if key not in ("results", "trial_results")}
     for name, rows in (("results.csv", report["results"]),
                        ("trial_results.csv", report.get("trial_results", []))):
-        records = [{**metadata, **{key: json.dumps(value) if isinstance(value, list) else value
+        records = [{**metadata, **{key: json.dumps(value) if isinstance(value, (list, dict)) else value
                                   for key, value in row.items()}} for row in rows]
         if records:
             pd.DataFrame(records).to_csv(directory / name, index=False, mode="x")
